@@ -32,81 +32,94 @@ await client.sAdd('c:u:c6', ['u3', 'u6']);
 await client.sAdd('c:u:c7', ['u3', 'u17']);
 await client.sAdd('c:u:c8', ['u3', 'u18']);
 
-type Rel = Record<string, {list: string[], count: number}>;
+let scipt = `
+-- Lua script to find relations in Redis
 
-type Rels = {
-    users: Rel,
-    devices: Rel,
-    cards: Rel,
-}
-
-
-let findRels = async (userId: string, maxLevel: number): Promise<Rels> => {
-    let rels: Rels = {
-        users: {},
-        devices: {},
-        cards: {},
-    };
-
-    let users = new Set([userId]);
-    let seen = new Set();
-    let level = 1;
-    while (level <= maxLevel) {
-        let devices = new Set<string>();
-        let cards = new Set<string>();
-        for (let user of users) {
-            if (seen.has(user)) {
-                continue;
-            }
-            let uDevices = await client.sMembers(`u:d:${user}`);
-            let uCards = await client.sMembers(`u:c:${user}`);
-            seen.add(user);
-            for (let d of uDevices) {
-                if (!seen.has(d)) {
-                    devices.add(d);
-                }
-            }
-            for (let c of uCards) {
-                if (!seen.has(c)) {
-                    cards.add(c);
-                }
-            }
-        }
-        rels.devices[level] = {list: [...devices], count: devices.size}
-        rels.cards[level] = {list: [...cards], count: cards.size}
-
-        users.clear();
-        for (let dev of devices) {
-            if (seen.has(dev)) {
-                continue;
-            }
-            let dUsers = await client.sMembers(`d:u:${dev}`);
-            seen.add(dev);
-            for (let u of dUsers) {
-                if (!seen.has(u)) {
-                    users.add(u);
-                } 
-            }
-        }
-        for (let card of cards) {
-            if (seen.has(card)) {
-                continue;
-            }
-            let dUsers = await client.sMembers(`c:u:${card}`);
-            seen.add(card);
-            for (let u of dUsers) {
-                if (!seen.has(u)) {
-                    users.add(u);
-                } 
-            }
-        }
-        rels.users[level] = {list: [...users], count: users.size}
-        level++;
+local function findRels(userId, maxLevel)
+    local rels = {
+        users = {},
+        devices = {},
+        cards = {}
     }
 
-    return rels;
-}
+    local users = {userId}
+    local seen = {}
+    local level = 1
+    while level <= maxLevel do
+        local devices = {}
+        local cards = {}
+        local devicesSet = {}
+        local cardsSet = {}
 
-console.log(await findRels('u1', 2))
+        for _, user in ipairs(users) do
+            if not seen[user] then
+                local uDevices = redis.call('SMEMBERS', 'u:d:' .. user)
+                local uCards = redis.call('SMEMBERS', 'u:c:' .. user)
+                seen[user] = true
+
+                for _, d in ipairs(uDevices) do
+                    if not seen[d] and not devicesSet[d] then
+                        devicesSet[d] = true
+                        table.insert(devices, d)
+                    end
+                end
+
+                for _, c in ipairs(uCards) do
+                    if not seen[c] and not cardsSet[c] then
+                        cardsSet[c] = true
+                        table.insert(cards, c)
+                    end
+                end
+            end
+        end
+
+        rels.devices[level] = { list = devices, count = #devices }
+        rels.cards[level] = { list = cards, count = #cards }
+
+        users = {}
+        for _, dev in ipairs(devices) do
+            if not seen[dev] then
+                local dUsers = redis.call('SMEMBERS', 'd:u:' .. dev)
+                seen[dev] = true
+
+                for _, u in ipairs(dUsers) do
+                    if not seen[u] then
+                        table.insert(users, u)
+                    end
+                end
+            end
+        end
+
+        for _, card in ipairs(cards) do
+            if not seen[card] then
+                local cUsers = redis.call('SMEMBERS', 'c:u:' .. card)
+                seen[card] = true
+
+                for _, u in ipairs(cUsers) do
+                    if not seen[u] then
+                        table.insert(users, u)
+                    end
+                end
+            end
+        end
+
+        rels.users[level] = { list = users, count = #users }
+        level = level + 1
+    end
+
+    return cjson.encode(rels)
+end
+
+return findRels(KEYS[1], tonumber(KEYS[2]))
+`;
+
+let sriptHash = await client.scriptLoad(scipt);
+
+let res = await client.evalSha(sriptHash, {
+    keys: ['u1', '2']
+});
+// await findRels('u1', 2)
+
+console.log(JSON.parse(res as string))
 
 await client.quit();
